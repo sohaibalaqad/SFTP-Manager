@@ -7,6 +7,7 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use RuntimeException;
+use Symfony\Component\Finder\Finder;
 use Symfony\Component\Process\Process;
 
 /**
@@ -47,6 +48,7 @@ class BuildPackage extends Command
         $this->components->task('Installing production dependencies', fn () => $this->runProcess(
             ['composer', 'install', '--no-dev', '--optimize-autoloader', '--no-interaction', '--no-progress'], $dir,
         ));
+        $this->components->task('Removing files not needed at runtime', fn () => $this->pruneVendor($dir));
         $this->components->task('Adding launchers and instructions', fn () => $this->addLaunchers($dir));
         $this->components->task('Creating zip', function () use ($work, $zip) {
             File::delete($zip);
@@ -81,6 +83,34 @@ class BuildPackage extends Command
             File::ensureDirectoryExists($dir.'/storage/'.$sub);
         }
         File::ensureDirectoryExists($dir.'/bootstrap/cache');
+
+        return true;
+    }
+
+    /**
+     * Drop contributor/tooling files that some dependencies ship alongside their code
+     * (editor and assistant instruction files). They are never loaded by the app.
+     */
+    private function pruneVendor(string $dir): bool
+    {
+        $vendor = $dir.'/vendor';
+
+        // Collect first, delete afterwards (deleting while Finder iterates breaks the traversal).
+        $files = [];
+        foreach (Finder::create()->files()->in($vendor)->ignoreDotFiles(false)->name(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', '.cursorrules']) as $file) {
+            $files[] = $file->getPathname();
+        }
+        $folders = [];
+        foreach (Finder::create()->directories()->in($vendor)->name('boost') as $folder) {
+            if (str_ends_with(str_replace('\\', '/', $folder->getRelativePathname()), '/resources/boost')) {
+                $folders[] = $folder->getPathname();
+            }
+        }
+
+        File::delete($files);
+        foreach ($folders as $folder) {
+            File::deleteDirectory($folder);
+        }
 
         return true;
     }
