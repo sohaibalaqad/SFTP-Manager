@@ -1,0 +1,58 @@
+# FrankenPHP config for `php artisan octane:start --server=frankenphp --caddyfile=Caddyfile`.
+# Same as Octane's default stub, plus:
+#   - `bind 127.0.0.1`: Octane's --host option does NOT restrict the listening address with FrankenPHP,
+#     so without this the app (which has no login) would be reachable from the local network.
+#   - quieter server logs (errors only) in the launcher window.
+{
+	{$CADDY_GLOBAL_OPTIONS}
+
+	admin {$CADDY_SERVER_ADMIN_HOST}:{$CADDY_SERVER_ADMIN_PORT}
+
+	log default {
+		level ERROR
+	}
+
+	frankenphp {
+		# Bigger upload chunks = fewer requests for large files (the UI adapts to these limits).
+		php_ini upload_max_filesize 16M
+		php_ini post_max_size 20M
+
+		worker {
+			file "{$APP_PUBLIC_PATH}/frankenphp-worker.php"
+			{$CADDY_SERVER_WORKER_DIRECTIVE}
+			{$CADDY_SERVER_WATCH_DIRECTIVES}
+		}
+	}
+}
+
+{$CADDY_EXTRA_CONFIG}
+
+{$CADDY_SERVER_SERVER_NAME} {
+	# Only this computer can open the app.
+	bind 127.0.0.1
+
+	log {
+		level {$CADDY_SERVER_LOG_LEVEL}
+		format filter {
+			wrap {$CADDY_SERVER_LOGGER}
+			fields {
+				uri query {
+					replace authorization REDACTED
+				}
+			}
+		}
+	}
+
+	route {
+		root * "{$APP_PUBLIC_PATH}"
+		encode zstd br gzip
+
+		{$CADDY_SERVER_EXTRA_DIRECTIVES}
+
+		php_server {
+			index frankenphp-worker.php
+			try_files {path} frankenphp-worker.php
+			resolve_root_symlink
+		}
+	}
+}
