@@ -654,6 +654,183 @@ class SftpService
     }
 
     // ---------------------------------------------------------------------
+    // Archives: moving whole files/trees between the server and a local folder
+    // ---------------------------------------------------------------------
+
+    /**
+     * Download one remote file to a local path.
+     *
+     * @param  callable(int): void|null  $progress  bytes received so far
+     * @return array{size: int, mtime: ?int}
+     */
+    public function fetch(string $rel, string $localFile, ?callable $progress = null): array
+    {
+        $path = $this->target($this->normalize($rel));
+        $stat = $this->sftp->stat($path);
+        if ($stat === false || ($stat['type'] ?? null) === NET_SFTP_TYPE_DIRECTORY) {
+            throw new SftpException('الملف غير موجود.', 404);
+        }
+
+        $this->call('تعذر تنزيل الملف.', fn () => $this->sftp->get($path, $localFile, 0, -1, $progress));
+
+        return ['size' => (int) ($stat['size'] ?? 0), 'mtime' => $stat['mtime'] ?? null];
+    }
+
+    /** Size and modification time of a remote file (used to reuse a cached download). */
+    public function fileInfo(string $rel): array
+    {
+        $stat = $this->sftp->stat($this->target($this->normalize($rel)));
+        if ($stat === false) {
+            throw new SftpException('الملف غير موجود.', 404);
+        }
+
+        return ['size' => (int) ($stat['size'] ?? 0), 'mtime' => $stat['mtime'] ?? null, 'dir' => ($stat['type'] ?? null) === NET_SFTP_TYPE_DIRECTORY];
+    }
+
+    /**
+     * Everything below the given items, as files and folders relative to their parent folder
+     * (each selected item keeps its own name). Symlinks inside folders are skipped.
+     *
+     * @param  list<string>  $rels
+     * @return array{items: list<array{rel: string, abs: string, dir: bool, size: int}>, bytes: int}
+     */
+    public function collect(array $rels, int $maxBytes, int $maxItems = 100000): array
+    {
+        $items = [];
+        $bytes = 0;
+        $add = function (array $item) use (&$items, &$bytes, $maxBytes, $maxItems): void {
+            $items[] = $item;
+            $bytes += $item['size'];
+            if (count($items) > $maxItems) {
+                throw new SftpException('عدد الملفات المحددة كبير جدًا.', 422);
+            }
+            if ($bytes > $maxBytes) {
+                throw new SftpException('حجم الملفات المحددة أكبر من الحد المسموح ('.intdiv($maxBytes, 1024 ** 3).' GB).', 422);
+            }
+        };
+
+        foreach ($rels as $rel) {
+            $rel = $this->normalize($rel);
+            $this->assertNotRoot($rel);
+            $abs = $this->target($rel);
+            $stat = $this->sftp->stat($abs);
+            if ($stat === false) {
+                throw new SftpException('الملف أو المجلد غير موجود.', 404);
+            }
+            $name = basename($rel);
+
+            if (($stat['type'] ?? null) !== NET_SFTP_TYPE_DIRECTORY) {
+                $add(['rel' => $name, 'abs' => $abs, 'dir' => false, 'size' => (int) ($stat['size'] ?? 0)]);
+
+                continue;
+            }
+
+            $add(['rel' => $name, 'abs' => $abs, 'dir' => true, 'size' => 0]);
+            $queue = [[$abs, $name]];
+            while ($queue) {
+                [$dir, $prefix] = array_shift($queue);
+                $raw = $this->call('تعذر قراءة المجلد.', fn () => $this->sftp->rawlist($dir));
+                foreach ($raw as $child => $attr) {
+                    $child = (string) $child;
+                    if ($child === '.' || $child === '..') {
+                        continue;
+                    }
+                    $type = $attr['type'] ?? null;
+                    $childAbs = $dir.'/'.$child;
+                    $childRel = $prefix.'/'.$child;
+                    if ($type === NET_SFTP_TYPE_DIRECTORY) {
+                        $add(['rel' => $childRel, 'abs' => $childAbs, 'dir' => true, 'size' => 0]);
+                        $queue[] = [$childAbs, $childRel];
+                    } elseif ($type === NET_SFTP_TYPE_REGULAR) {
+                        $add(['rel' => $childRel, 'abs' => $childAbs, 'dir' => false, 'size' => (int) ($attr['size'] ?? 0)]);
+                    }
+                }
+            }
+        }
+
+        return ['items' => $items, 'bytes' => $bytes];
+    }
+
+    /**
+     * Download collected items into a local folder, keeping their structure.
+     *
+     * @param  list<array{rel: string, abs: string, dir: bool, size: int}>  $items
+     * @param  callable(int): void|null  $progress  total bytes received so far
+     */
+    public function fetchTree(array $items, string $localDir, ?callable $progress = null): void
+    {
+        $done = 0;
+        foreach ($items as $item) {
+            $local = $localDir.'/'.$item['rel'];
+            if ($item['dir']) {
+                @mkdir($local, 0700, true);
+
+                continue;
+            }
+            @mkdir(dirname($local), 0700, true);
+            $base = $done;
+            $this->call('تعذر تنزيل الملف.', fn () => $this->sftp->get($item['abs'], $local, 0, -1, $progress ? fn (int $bytes) => $progress($base + $bytes) : null));
+            $done += $item['size'];
+            if ($progress) {
+                $progress($done);
+            }
+        }
+    }
+
+    /** Create a folder (and missing parents) below a root-relative folder. */
+    public function makeDirs(string $dirRel, string $sub): void
+    {
+        $sub = trim($sub, '/');
+        if ($sub === '') {
+            return;
+        }
+        $path = $this->joinAbs($this->target($this->normalize($dirRel)), $this->normalize($sub));
+        if ($this->sftp->is_dir($path)) {
+            return;
+        }
+        $this->call('تعذر إنشاء المجلد.', fn () => $this->sftp->mkdir($path, -1, true));
+    }
+
+    /**
+     * Upload a local file to $dirRel/$relPath. Returns false when it already exists and
+     * $overwrite is false (the file is then left untouched).
+     */
+    public function putFile(string $dirRel, string $relPath, string $localFile, bool $overwrite, ?callable $progress = null): bool
+    {
+        $path = $this->joinAbs($this->target($this->normalize($dirRel)), $this->normalize($relPath));
+        if (! $overwrite && $this->sftp->lstat($path) !== false) {
+            return false;
+        }
+        $this->call('تعذر رفع الملف.', fn () => $this->sftp->put($path, $localFile, SFTP::SOURCE_LOCAL_FILE, -1, -1, $progress));
+
+        return true;
+    }
+
+    /** A name that does not exist yet in the folder: "backup", "backup (2)", … */
+    public function freeName(string $dirRel, string $name, bool $isDir): string
+    {
+        $dir = $this->target($this->normalize($dirRel));
+        if ($this->sftp->lstat($this->joinAbs($dir, $name)) === false) {
+            return $name;
+        }
+
+        $ext = '';
+        $base = $name;
+        if (! $isDir && ($dot = strrpos($name, '.')) > 0) {
+            $base = substr($name, 0, $dot);
+            $ext = substr($name, $dot);
+        }
+        for ($i = 2; $i < 1000; $i++) {
+            $candidate = "{$base} ({$i}){$ext}";
+            if ($this->sftp->lstat($this->joinAbs($dir, $candidate)) === false) {
+                return $candidate;
+            }
+        }
+
+        throw new SftpException('تعذر إيجاد اسم متاح.', 409);
+    }
+
+    // ---------------------------------------------------------------------
     // Internals
     // ---------------------------------------------------------------------
 

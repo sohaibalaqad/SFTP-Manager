@@ -48,6 +48,8 @@ if not exist "%ENGINE%php.ini" (
         echo extension=sodium
         echo extension=gmp
         echo extension=curl
+        echo extension=zip
+        echo extension=bz2
         echo upload_max_filesize=64M
         echo post_max_size=70M
         echo memory_limit=512M

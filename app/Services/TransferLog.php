@@ -84,9 +84,12 @@ class TransferLog
     /**
      * Live byte count of a running transfer (one small file per transfer, overwritten, never appended).
      */
-    public function progress(string $id, int $bytes): void
+    public function progress(string $id, int $bytes, ?int $total = null, ?string $phase = null): void
     {
-        @file_put_contents($this->progressFile($id), json_encode(['id' => $id, 'bytes' => $bytes]), LOCK_EX);
+        @file_put_contents($this->progressFile($id), json_encode(array_filter(
+            ['id' => $id, 'bytes' => $bytes, 'total' => $total, 'phase' => $phase],
+            fn ($v) => $v !== null,
+        )), LOCK_EX);
     }
 
     public function clearProgress(string $id): void
@@ -124,6 +127,12 @@ class TransferLog
             $p = json_decode((string) @file_get_contents($file), true);
             if (isset($p['id'], $rows[$p['id']]) && $rows[$p['id']]['status'] === 'started') {
                 $rows[$p['id']]['transferred'] = (int) $p['bytes'];
+                if (isset($p['total'])) {
+                    $rows[$p['id']]['progressTotal'] = (int) $p['total'];
+                }
+                if (isset($p['phase'])) {
+                    $rows[$p['id']]['phase'] = $p['phase'];
+                }
             }
         }
 

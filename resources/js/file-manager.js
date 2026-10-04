@@ -51,7 +51,12 @@ function chime() {
     } catch {}
 }
 
-const ACTIVE = ['queued', 'waiting', 'uploading', 'downloading', 'retrying'];
+const ACTIVE = ['queued', 'waiting', 'uploading', 'downloading', 'retrying', 'working'];
+
+// Archives handled by the app (others, like .rar/.7z, show a clear "not supported" message).
+const OPENABLE_ARCHIVE = /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?)$/i;
+const archiveBase = (name) => name.replace(/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?)$/i, '');
+const PHASES = { download: 'تنزيل من السيرفر', extract: 'استخراج', compress: 'ضغط', upload: 'رفع إلى السيرفر', send: 'إرسال إلى جهازك' };
 
 // ---------------------------------------------------------------- resumable uploads
 // Automatic retries after a network drop (seconds to wait before each attempt). Waiting while the
@@ -201,6 +206,9 @@ const fileManager = (config) => ({
     dropTarget: null, // folder path when dragging over a folder row
     uploadBatch: { total: 0, ok: 0, failed: 0, paused: 0 },
     dark: currentTheme() === 'dark',
+
+    // Archive viewer (contents of a .zip/.tar… without extracting it).
+    archive: { open: false, item: null, loading: false, error: '', entries: [], format: '', size: 0, skipped: 0, truncated: false, filter: '' },
 
     // Folder watch: checks one folder periodically and alerts about new files.
     watch: { path: null, interval: 30, sound: true, lastCheck: null, error: '' },
@@ -633,6 +641,10 @@ const fileManager = (config) => ({
         this.viewer = { open: true, kind: 'loading', item, dirty: false, saving: false, mtime: item.mtime, size: item.size, error: '', src: '', remoteChanged: null };
 
         if (IMAGE_EXT.includes(ext)) return Object.assign(this.viewer, { kind: 'image', src });
+        if (this.isArchive(item) || ['rar', '7z'].includes(ext)) {
+            this.viewer.open = false;
+            return this.openArchive(item);
+        }
         if (ext === 'pdf') return Object.assign(this.viewer, { kind: 'pdf', src });
 
         try {
@@ -747,8 +759,10 @@ const fileManager = (config) => ({
     // ------------------------------------------------------------------ file operations
 
     download(items = this.selectedItems) {
-        const files = items.filter((i) => !i.dir);
-        if (!files.length) return this.toast('اختر ملفًا للتنزيل (المجلدات غير مدعومة).', 'warning');
+        if (!items.length) return;
+        // Folders can only be downloaded as one ZIP file.
+        if (items.some((i) => i.dir)) return this.downloadAsZip(items);
+        const files = items;
         files.forEach((item, n) =>
             setTimeout(() => {
                 const tid = hexId();
@@ -1341,11 +1355,178 @@ const fileManager = (config) => ({
     },
 
     transferStatus(t) {
+        if (t.phase && ['working', 'downloading'].includes(t.status)) {
+            const pct = t.size ? ` ${this.percent(t)}%` : '';
+            return `${PHASES[t.phase] ?? ''}${pct}`;
+        }
         return {
             queued: 'في الانتظار', waiting: 'بانتظار المتصفح…', uploading: `${this.percent(t)}%`, downloading: `${this.percent(t)}%`,
-            done: 'اكتمل', error: 'فشل', canceled: 'ملغى', unknown: 'غير معروف', paused: 'متوقف مؤقتًا',
+            done: 'اكتمل', error: 'فشل', canceled: 'ملغى', unknown: 'غير معروف', paused: 'متوقف مؤقتًا', working: 'جارٍ التحضير…',
             retrying: t.retryIn ? `إعادة خلال ${t.retryIn}ث` : 'إعادة المحاولة…',
         }[t.status];
+    },
+
+    // ------------------------------------------------------------------ archives
+
+    isArchive(item) {
+        return !!item && !item.dir && OPENABLE_ARCHIVE.test(item.name);
+    },
+
+    async openArchive(item) {
+        this.archive = { open: true, item, loading: true, error: '', entries: [], format: '', size: 0, skipped: 0, truncated: false, filter: '' };
+        try {
+            const res = await api('GET', '/api/archive/list', { path: item.path });
+            if (this.archive.item !== item) return;
+            Object.assign(this.archive, { entries: res.entries, format: res.format, size: res.size, skipped: res.skipped, truncated: res.truncated });
+        } catch (e) {
+            if (e.status !== 401) this.archive.error = e.message;
+        } finally {
+            this.archive.loading = false;
+        }
+    },
+
+    get archiveRows() {
+        const q = this.archive.filter.trim().toLowerCase();
+        const rows = q ? this.archive.entries.filter((e) => e.path.toLowerCase().includes(q)) : this.archive.entries;
+        return rows.slice(0, 3000);
+    },
+
+    get archiveFileCount() {
+        return this.archive.entries.filter((e) => !e.dir).length;
+    },
+
+    downloadArchiveEntry(entry) {
+        const a = document.createElement('a');
+        a.href = `/api/archive/entry?path=${encodeURIComponent(this.archive.item.path)}&entry=${encodeURIComponent(entry.path)}`;
+        a.download = entry.path.split('/').pop();
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    },
+
+    /**
+     * Extract an archive on the server ("here" = next to it, "folder" = into a new folder named after it).
+     * The archive is processed on this computer: downloaded once, unpacked, and its files uploaded.
+     */
+    async extractArchive(item = this.single, mode = 'folder') {
+        if (!this.isArchive(item)) return;
+        const parent = this.parentOf(item.path);
+        let conflict = 'overwrite';
+
+        if (mode === 'here') {
+            // Ask before overwriting files that already exist next to the archive.
+            try {
+                const entries = this.archive.item === item && this.archive.entries.length ? this.archive.entries : (await api('GET', '/api/archive/list', { path: item.path })).entries;
+                const top = [...new Set(entries.map((e) => e.path.split('/')[0]))];
+                const existing = parent === this.path && this.searchResults === null ? this.items : (await api('GET', '/api/list', { path: parent })).items;
+                const clash = top.filter((n) => existing.some((i) => i.name === n));
+                if (clash.length) {
+                    const choice = await this.confirm({
+                        title: 'عناصر موجودة',
+                        message: `هذه العناصر موجودة مسبقًا بجانب الأرشيف:\n${clash.slice(0, 8).map((n) => `• ${iso(n)}`).join('\n')}${clash.length > 8 ? '\n…' : ''}\n\nهل تريد استبدال الملفات الموجودة؟`,
+                        confirmText: 'استبدال',
+                        altText: 'تخطي الموجود',
+                        cancelText: 'إلغاء',
+                        danger: true,
+                        focusCancel: true,
+                    });
+                    if (choice === false) return;
+                    conflict = choice === 'alt' ? 'skip' : 'overwrite';
+                }
+            } catch (e) {
+                return this.fail(e);
+            }
+        }
+
+        const tid = hexId();
+        const t = {
+            id: `ar-${tid}`, kind: 'archive', mode: 'server', name: item.name, action: 'extract', size: 0, loaded: 0, status: 'working', phase: null, error: '',
+            from: this.absPath(item.path), to: this.absPath(mode === 'folder' ? joinRel(parent, archiveBase(item.name)) : parent), startedAt: Date.now(),
+        };
+        this.transfers.push(t);
+        const tracked = this.transfers.at(-1);
+        this.watchLog();
+
+        try {
+            const res = await api('POST', '/api/archive/extract', { path: item.path, mode, conflict, tid });
+            Object.assign(tracked, { status: 'done', phase: null, to: this.absPath(res.target), loaded: res.bytes ?? 0, size: res.bytes ?? 0 });
+            const extras = [
+                res.existing && `تم تخطي ${res.existing} ملف موجود`,
+                res.unsafe && `تم تجاهل ${res.unsafe} عنصر غير آمن أو رابط رمزي`,
+            ].filter(Boolean).join('، ');
+            this.notify(`تم استخراج ${res.files} ملف إلى ${iso(this.absPath(res.target))}${extras ? ` (${extras})` : ''}.`, res.unsafe ? 'warning' : 'success', 'اكتمل الاستخراج');
+            this.archive.open = false;
+            this.scheduleRefresh(parent);
+            if (mode === 'folder' && parent === this.path) {
+                this.selected = [res.target];
+                this.anchor = res.target;
+            }
+        } catch (e) {
+            if (e.status === 401) return;
+            Object.assign(tracked, { status: 'error', phase: null, error: e.message });
+            this.notify(`فشل استخراج ${iso(item.name)}: ${e.message}`, 'error', 'فشل الاستخراج');
+        } finally {
+            if (this.logOpen) this.loadLog();
+        }
+    },
+
+    defaultZipName(items) {
+        if (items.length === 1) return `${items[0].dir ? items[0].name : items[0].name.replace(/\.[^.]+$/, '') || items[0].name}.zip`;
+        return `${this.path.split('/').filter(Boolean).pop() || 'archive'}.zip`;
+    },
+
+    /** Compress the selection into a ZIP file in the current server folder. */
+    async compressItems(items = this.selectedItems) {
+        if (!items.length) return;
+        let name = await this.ask({ title: 'ضغط إلى ZIP', label: 'اسم الملف المضغوط', value: this.defaultZipName(items), confirmText: 'ضغط', selectStem: true });
+        if (!name) return;
+        if (!/\.zip$/i.test(name)) name += '.zip';
+        const dest = this.path;
+
+        const tid = hexId();
+        this.transfers.push({
+            id: `ar-${tid}`, kind: 'archive', mode: 'server', name, action: 'compress', size: 0, loaded: 0, status: 'working', phase: null, error: '',
+            from: items.length === 1 ? this.absPath(items[0].path) : `${items.length} عناصر من ${this.absPath(dest)}`, to: this.absPath(joinRel(dest, name)), startedAt: Date.now(),
+        });
+        const tracked = this.transfers.at(-1);
+        this.watchLog();
+
+        try {
+            const res = await api('POST', '/api/archive/compress', { paths: items.map((i) => i.path), dest, name, tid });
+            Object.assign(tracked, { status: 'done', phase: null, name: res.name, to: this.absPath(joinRel(dest, res.name)), loaded: res.bytes ?? 0, size: res.bytes ?? 0 });
+            this.notify(`تم إنشاء ${iso(res.name)}.`, 'success', 'اكتمل الضغط');
+            this.scheduleRefresh(dest);
+            if (dest === this.path) {
+                this.selected = [joinRel(dest, res.name)];
+                this.anchor = this.selected[0];
+            }
+        } catch (e) {
+            if (e.status === 401) return;
+            Object.assign(tracked, { status: 'error', phase: null, error: e.message });
+            this.notify(`فشل إنشاء الملف المضغوط: ${e.message}`, 'error', 'فشل الضغط');
+        } finally {
+            if (this.logOpen) this.loadLog();
+        }
+    },
+
+    /** Download files and folders as one ZIP to this computer's downloads folder. */
+    downloadAsZip(items = this.selectedItems) {
+        if (!items.length) return;
+        const tid = hexId();
+        const name = this.defaultZipName(items);
+        this.transfers.push({
+            id: `dl-${tid}`, tid, kind: 'download', mode: 'browser', name, size: 0, loaded: 0, status: 'waiting', phase: null, error: '',
+            from: items.length === 1 ? this.absPath(items[0].path) : `${items.length} عناصر من ${this.absPath(this.path)}`,
+            to: 'مجلد التنزيلات في المتصفح', since: Date.now(), startedAt: null,
+        });
+        this.watchLog();
+        const query = items.map((i) => `paths[]=${encodeURIComponent(i.path)}`).join('&');
+        const a = document.createElement('a');
+        a.href = `/api/archive/zip?${query}&tid=${tid}`;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     },
 
     // ------------------------------------------------------------------ folder watch
@@ -1574,7 +1755,7 @@ const fileManager = (config) => ({
     watchLog() {
         if (logTimer) return;
         const tick = async () => {
-            if (!this.transfers.some((t) => t.mode === 'browser' && ACTIVE.includes(t.status))) {
+            if (!this.transfers.some((t) => (t.mode === 'browser' || t.mode === 'server') && ACTIVE.includes(t.status))) {
                 logTimer = null;
                 return;
             }
@@ -1591,6 +1772,15 @@ const fileManager = (config) => ({
 
     checkPendingDownloads() {
         for (const t of this.transfers) {
+            if (t.mode === 'server' && ACTIVE.includes(t.status)) {
+                // Archive work: only the progress comes from the log; the request itself reports the result.
+                const entry = this.logEntries.find((e) => e.id === t.id);
+                if (entry?.status === 'started' && entry.phase) {
+                    if (t.phase !== entry.phase) t.startedAt = Date.now();
+                    Object.assign(t, { phase: entry.phase, loaded: entry.transferred ?? 0, size: entry.progressTotal ?? 0, baseLoaded: 0 });
+                }
+                continue;
+            }
             if (t.mode !== 'browser' || !ACTIVE.includes(t.status)) continue;
             const entry = this.logEntries.find((e) => e.id === t.id);
             if (!entry) {
@@ -1606,11 +1796,16 @@ const fileManager = (config) => ({
                     t.status = 'downloading';
                     t.startedAt = Date.now();
                 }
+                if (entry.phase) {
+                    // ZIP downloads: collect → compress → send, each with its own progress.
+                    if (t.phase !== entry.phase) t.startedAt = Date.now();
+                    Object.assign(t, { phase: entry.phase, size: entry.progressTotal ?? t.size, baseLoaded: 0 });
+                }
                 t.loaded = entry.transferred ?? t.loaded;
                 continue;
             }
             if (entry.status === 'success') {
-                Object.assign(t, { status: 'done', loaded: t.size });
+                Object.assign(t, { status: 'done', phase: null, size: entry.size ?? t.size, loaded: entry.size ?? t.size });
                 this.notify(`تم تنزيل ${iso(t.name)} إلى جهازك بنجاح (${iso(formatSize(entry.size))}).`, 'success', 'اكتمل التنزيل');
             } else if (entry.status === 'canceled') {
                 t.status = 'canceled';
@@ -1667,7 +1862,10 @@ const fileManager = (config) => ({
     },
 
     logTypeLabel(entry) {
-        return { upload: 'رفع: الجهاز ← السيرفر', download: 'تنزيل: السيرفر ← الجهاز', save: 'حفظ من المحرر ← السيرفر' }[entry.type] ?? entry.type;
+        return {
+            upload: 'رفع: الجهاز ← السيرفر', download: 'تنزيل: السيرفر ← الجهاز', save: 'حفظ من المحرر ← السيرفر',
+            extract: 'استخراج أرشيف على السيرفر', compress: 'ضغط إلى ZIP على السيرفر',
+        }[entry.type] ?? entry.type;
     },
 
     formatTime(ts) {
@@ -1709,6 +1907,10 @@ const fileManager = (config) => ({
         const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
         if (this.logOpen && key === 'Escape' && !this.dialog.open) return (this.logOpen = false);
+        if (this.archive.open && !this.dialog.open) {
+            if (key === 'Escape') this.archive.open = false;
+            return;
+        }
         if (this.dialog.open) {
             if (key === 'Escape') this.closeDialog(false);
             return;

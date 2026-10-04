@@ -78,6 +78,10 @@
         <button class="tool" @click="rename()" :disabled="!single" title="إعادة تسمية (F2)"><x-icon name="rename" />إعادة تسمية</button>
         <button class="tool hover:text-rose-600" @click="remove()" :disabled="!selected.length" title="حذف (Delete)"><x-icon name="trash" />حذف</button>
         <button class="tool" @click="properties()" :disabled="!single" title="خصائص"><x-icon name="info" />خصائص</button>
+        <button class="tool" @click="isArchive(single) ? extractArchive(single, 'folder') : compressItems()" :disabled="!selected.length"
+                :title="isArchive(single) ? 'استخراج الأرشيف إلى مجلد باسمه' : 'ضغط المحدد إلى ملف ZIP على السيرفر'">
+            <x-icon name="archive" /><span x-text="isArchive(single) ? 'استخراج' : 'ضغط'"></span>
+        </button>
         <span class="mx-1 h-5 w-px bg-slate-300 dark:bg-slate-700"></span>
         <button class="tool" @click="toggleLocal()" :class="localVisible && 'bg-slate-200/80 dark:bg-slate-800'" title="إظهار/إخفاء لوحة الملفات المحلية"><x-icon name="laptop" />الملفات المحلية</button>
 
@@ -263,6 +267,7 @@
 
     @include('partials.transfers')
     @include('partials.sync')
+    @include('partials.archive')
 
     {{-- ============================== Status bar ============================== --}}
     <footer class="flex h-7 shrink-0 items-center gap-4 border-t border-slate-200 bg-slate-50 px-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
@@ -292,6 +297,16 @@
                 <button class="menu-item" @click="menuAction(() => open(menu.item))"><x-icon name="eye" />فتح <span class="kbd">Enter</span></button>
                 <button class="menu-item" x-show="!menu.item.dir" @click="menuAction(() => download())"><x-icon name="download" />تنزيل (مجلد التنزيلات)</button>
                 <button class="menu-item" x-show="!menu.item.dir && localMode === 'fsa'" @click="menuAction(() => downloadHere())"><x-icon name="laptop" />تنزيل إلى المجلد المحلي المفتوح</button>
+                <button class="menu-item" x-show="menu.item.dir || selected.length > 1" @click="menuAction(() => downloadAsZip())"><x-icon name="download" />تنزيل كملف ZIP</button>
+                <template x-if="isArchive(menu.item) && single">
+                    <div>
+                        <div class="my-1 border-t border-slate-100 dark:border-slate-700"></div>
+                        <button class="menu-item" @click="menuAction(() => openArchive(menu.item))"><x-icon name="archive" />عرض محتوى الأرشيف</button>
+                        <button class="menu-item" @click="menuAction(() => extractArchive(menu.item, 'here'))"><x-icon name="folder-open" />استخراج هنا</button>
+                        <button class="menu-item" @click="menuAction(() => extractArchive(menu.item, 'folder'))"><x-icon name="folder-plus" /><span>استخراج إلى «<bdi x-text="menu.item.name.replace(/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?)$/i, '')"></bdi>»</span></button>
+                    </div>
+                </template>
+                <button class="menu-item" @click="menuAction(() => compressItems())"><x-icon name="archive" />ضغط إلى ZIP</button>
                 <div class="my-1 border-t border-slate-100 dark:border-slate-700"></div>
                 <button class="menu-item" @click="menuAction(() => copy('copy'))"><x-icon name="copy" />نسخ <span class="kbd" dir="ltr">Ctrl+C</span></button>
                 <button class="menu-item" @click="menuAction(() => copy('cut'))"><x-icon name="cut" />قص <span class="kbd" dir="ltr">Ctrl+X</span></button>

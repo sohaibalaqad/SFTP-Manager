@@ -17,20 +17,21 @@
             <li class="flex items-center gap-3 px-3 py-2">
                 {{-- direction --}}
                 <span class="grid size-7 shrink-0 place-items-center rounded-full"
-                      :class="t.kind === 'upload' ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50' : 'bg-sky-50 text-sky-600 dark:bg-sky-950/50'"
-                      :title="t.kind === 'upload' ? 'رفع: جهازك ← السيرفر' : 'تنزيل: السيرفر ← جهازك'">
+                      :class="t.kind === 'upload' ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50' : t.kind === 'archive' ? 'bg-violet-50 text-violet-600 dark:bg-violet-950/50' : 'bg-sky-50 text-sky-600 dark:bg-sky-950/50'"
+                      :title="t.kind === 'upload' ? 'رفع: جهازك ← السيرفر' : t.kind === 'archive' ? (t.action === 'extract' ? 'استخراج أرشيف على السيرفر' : 'ضغط إلى ZIP على السيرفر') : 'تنزيل: السيرفر ← جهازك'">
                     <template x-if="t.kind === 'upload'"><x-icon name="upload" class="size-3.5" /></template>
                     <template x-if="t.kind === 'download'"><x-icon name="download" class="size-3.5" /></template>
+                    <template x-if="t.kind === 'archive'"><x-icon name="archive" class="size-3.5" /></template>
                 </span>
 
                 {{-- name + from → to --}}
                 <div class="w-72 min-w-0 shrink-0">
                     <bdi class="block truncate text-[13px] font-medium" x-text="t.name"></bdi>
                     <div class="truncate text-[10px] text-slate-400">
-                        <span x-text="t.kind === 'upload' ? 'من جهازك: ' : 'من السيرفر: '"></span><bdi dir="ltr" class="font-mono" x-text="t.from"></bdi>
+                        <span x-text="t.kind === 'upload' ? 'من جهازك: ' : t.kind === 'archive' ? (t.action === 'extract' ? 'استخراج: ' : 'ضغط: ') : 'من السيرفر: '"></span><bdi dir="ltr" class="font-mono" x-text="t.from"></bdi>
                     </div>
                     <div class="truncate text-[10px] text-slate-400">
-                        <span x-text="t.kind === 'upload' ? 'إلى السيرفر: ' : 'إلى جهازك: '"></span><bdi dir="ltr" class="font-mono" x-text="t.to"></bdi>
+                        <span x-text="t.kind === 'download' ? 'إلى جهازك: ' : 'إلى السيرفر: '"></span><bdi dir="ltr" class="font-mono" x-text="t.to"></bdi>
                     </div>
                 </div>
 
@@ -44,9 +45,9 @@
                                 'bg-slate-400': t.status === 'canceled' || t.status === 'unknown',
                                 'bg-amber-500': t.status === 'paused' || t.status === 'retrying',
                                 'bg-sky-500': !['error', 'done', 'canceled', 'unknown', 'paused', 'retrying'].includes(t.status),
-                                'animate-pulse': t.status === 'waiting',
+                                'animate-pulse': t.status === 'waiting' || (t.status === 'working' && !t.size),
                              }"
-                             :style="`width:${t.status === 'waiting' ? 100 : percent(t)}%; opacity:${t.status === 'waiting' ? .25 : 1}`"></div>
+                             :style="`width:${t.status === 'waiting' || (t.status === 'working' && !t.size) ? 100 : percent(t)}%; opacity:${t.status === 'waiting' || (t.status === 'working' && !t.size) ? .25 : 1}`"></div>
                     </div>
                     <div class="mt-1 flex justify-between gap-2 text-[10px] text-slate-400" dir="ltr">
                         <span x-text="`${formatSize(t.loaded)} / ${formatSize(t.size)}`"></span>
@@ -58,7 +59,7 @@
 
                 {{-- status --}}
                 <span class="w-24 shrink-0 text-end text-xs font-medium tabular-nums"
-                      :class="{ 'text-emerald-600': t.status === 'done', 'text-rose-600': t.status === 'error', 'text-slate-400': ['canceled', 'queued', 'unknown', 'waiting'].includes(t.status), 'text-sky-600': ['uploading', 'downloading'].includes(t.status), 'text-amber-600': ['paused', 'retrying'].includes(t.status) }"
+                      :class="{ 'text-emerald-600': t.status === 'done', 'text-rose-600': t.status === 'error', 'text-slate-400': ['canceled', 'queued', 'unknown', 'waiting'].includes(t.status), 'text-sky-600': ['uploading', 'downloading', 'working'].includes(t.status), 'text-amber-600': ['paused', 'retrying'].includes(t.status) }"
                       x-text="transferStatus(t)"></span>
 
                 {{-- resume (paused uploads) --}}
@@ -69,7 +70,7 @@
 
                 {{-- cancel --}}
                 <div class="w-6 shrink-0">
-                    <button x-show="['queued', 'uploading', 'downloading', 'retrying', 'paused'].includes(t.status) && t.mode !== 'browser'" @click="cancelTransfer(t)"
+                    <button x-show="['queued', 'uploading', 'downloading', 'retrying', 'paused'].includes(t.status) && t.mode !== 'browser' && t.mode !== 'server'" @click="cancelTransfer(t)"
                             class="grid size-6 place-items-center rounded text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40" title="إلغاء">
                         <x-icon name="x" class="size-3.5" />
                     </button>

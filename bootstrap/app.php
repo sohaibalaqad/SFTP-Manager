@@ -17,7 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         // File contents, paths and names must reach the server byte-for-byte.
-        $fields = ['content', 'path', 'paths', 'paths.*', 'dirs', 'dirs.*', 'files', 'files.*', 'dest', 'list', 'name', 'password', 'private_key', 'passphrase'];
+        $fields = ['content', 'path', 'paths', 'paths.*', 'dirs', 'dirs.*', 'files', 'files.*', 'dest', 'list', 'entry', 'name', 'password', 'private_key', 'passphrase'];
         $middleware->trimStrings(except: $fields);
         $middleware->convertEmptyStringsToNull(except: [fn (Request $r) => $r->is('api/write')]);
     })

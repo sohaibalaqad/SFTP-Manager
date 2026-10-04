@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\ArchiveController;
 use App\Http\Controllers\ConnectionController;
 use App\Http\Controllers\FileManagerController;
 use App\Http\Middleware\EnsureSftpConnected;
@@ -17,6 +18,13 @@ Route::post('/api/log/clear', [FileManagerController::class, 'clearLog'])->name(
 Route::get('/files', [FileManagerController::class, 'index'])->name('files');
 
 Route::middleware(EnsureSftpConnected::class)->group(function () {
+    Route::prefix('api/archive')->name('api.archive.')->controller(ArchiveController::class)->group(function () {
+        Route::get('/list', 'list')->name('list');
+        Route::get('/entry', 'entry')->name('entry');
+        Route::get('/zip', 'downloadZip')->name('zip');
+        Route::post('/extract', 'extract')->name('extract');
+        Route::post('/compress', 'compress')->name('compress');
+    });
 
     Route::prefix('api')->name('api.')->controller(FileManagerController::class)->group(function () {
         Route::get('/list', 'list')->name('list');

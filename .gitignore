@@ -24,6 +24,7 @@ Homestead.json
 Homestead.yaml
 Thumbs.db
 /storage/app/transfer-logs
+/storage/app/archive-work
 
 **/caddy
 frankenphp

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Middleware\EnsureSftpConnected;
+use App\Services\ArchiveService;
 use App\Services\SftpConnectionPool;
 use App\Services\SftpService;
 use App\Services\TransferLog;
@@ -76,6 +77,7 @@ class ConnectionController extends Controller
 
         // Fresh temporary transfer log for this connection.
         TransferLog::prune();
+        ArchiveService::prune(max(3600, (int) config('session.lifetime') * 60 + 3600));
         $this->deleteLog($request);
         $this->closePooledConnection($request); // switching servers: close the previous one
 
@@ -137,6 +139,7 @@ class ConnectionController extends Controller
         $id = $request->session()->get(EnsureSftpConnected::SESSION_KEY.'.log');
         if (is_string($id)) {
             TransferLog::forId($id)->delete();
+            ArchiveService::deleteWorkspace($id);
         }
     }
 }
