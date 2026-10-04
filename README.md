@@ -10,6 +10,7 @@ Runs locally on your computer, no database, no accounts.
 - **Browse & manage files** — open, create, rename, copy, move and delete files and folders
 - **Upload & download** — drag and drop files or whole folders, with progress and automatic resume
 - **Built-in code editor** — syntax highlighting, search and safe saving
+- **Archives** — browse ZIP and TAR files, extract them on the server, compress files or download folders as ZIP
 - **Local & remote side by side** — work with files on your computer and on the server in one window
 - **Compare & sync** — upload only what changed between a local folder and the server
 - **Folder watch** — get notified when new files arrive
